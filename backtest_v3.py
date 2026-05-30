@@ -1,9 +1,12 @@
 """
-BTC/USDT — 15 Dakikalık Backtest (Hedge Mode)
-- Her sinyal bağımsız trade olarak açılır
-- Aynı anda birden fazla long/short açık olabilir
-- Hiçbir trade diğerini kapatmaz
-Veri: yfinance (GitHub Actions uyumlu)
+BTC/USDT — 15m Backtest
+Strateji: EMA Trend + Pullback
+- EMA200 trend yonu belirler
+- Fiyat EMA50'ye geri ceker (pullback zone)
+- EMA21 momentum teyidi (kapanisin EMA21 ustunde/altinda olmasi)
+- ATR bazli SL, RR 1.8 TP
+- Hedge mode: her sinyal bagimsiz acilir
+Veri: yfinance
 """
 
 import yfinance as yf
@@ -24,6 +27,12 @@ RISK_PER_TRADE_USD = 10
 SAFE_RISK_USD      = 5
 RR                 = 1.8
 INITIAL_CAPITAL    = 1000.0
+
+# Pullback zone genisligi: fiyat EMA50'nin kac ATR yakininda olmali
+PULLBACK_ATR = 1.0
+
+# Cooldown: bir sinyal acildiktan sonra kac mum beklenir (ayni yon)
+COOLDOWN_BARS = 8
 
 # ─────────────────────────────────────────
 # VERI CEKIMI
@@ -77,56 +86,91 @@ def calc_ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
 # ─────────────────────────────────────────
-# STRATEJI SINYALI
+# STRATEJI SINYALI: EMA TREND + PULLBACK
+#
+# LONG kosullari (hepsi ayni anda):
+#   1. EMA50 > EMA200  (yukari trend)
+#   2. Fiyat EMA200 ustunde
+#   3. Fiyat EMA50'ye yaklasmis (pullback zone: EMA50 - PULLBACK_ATR*ATR ile EMA50 + 0.3*ATR arasi)
+#   4. Kapanis EMA21 ustunde (momentum donus teyidi)
+#   5. Bu mum bir onceki mumdan dusuk acilip yukari kapanmis (bullish mum)
+#
+# SHORT kosullari (tersi):
+#   1. EMA50 < EMA200  (asagi trend)
+#   2. Fiyat EMA200 altinda
+#   3. Fiyat EMA50'ye yaklasmis (pullback zone)
+#   4. Kapanis EMA21 altinda
+#   5. Bearish mum
 # ─────────────────────────────────────────
 
 def generate_signals(df):
     df = df.copy()
-    df["ema50"]      = calc_ema(df["c"], 50)
-    df["ema200"]     = calc_ema(df["c"], 200)
-    df["atr"]        = calc_atr(df, 14)
-    df["roll_high"]  = df["h"].rolling(20).max().shift(1)
-    df["roll_low"]   = df["l"].rolling(20).min().shift(1)
-    df["swing_low"]  = df["l"].rolling(10).min().shift(2)
-    df["swing_high"] = df["h"].rolling(10).max().shift(2)
+    df["ema21"]  = calc_ema(df["c"], 21)
+    df["ema50"]  = calc_ema(df["c"], 50)
+    df["ema200"] = calc_ema(df["c"], 200)
+    df["atr"]    = calc_atr(df, 14)
+
+    # Swing SL icin
+    df["swing_low"]  = df["l"].rolling(10).min().shift(1)
+    df["swing_high"] = df["h"].rolling(10).max().shift(1)
 
     signals = []
+    last_long_bar  = -999
+    last_short_bar = -999
+
     for i in range(200, len(df)):
         row    = df.iloc[i]
+        ema21  = row["ema21"]
         ema50  = row["ema50"]
         ema200 = row["ema200"]
-        price  = row["c"]
+        atr    = row["atr"]
+        c      = row["c"]
+        o      = row["o"]
 
-        if pd.isna(ema50) or pd.isna(ema200):
+        if pd.isna(ema21) or pd.isna(ema50) or pd.isna(ema200) or pd.isna(atr) or atr == 0:
             continue
 
-        if   ema50 > ema200 and price > ema50:  direction = "LONG"
-        elif ema50 < ema200 and price < ema50:  direction = "SHORT"
-        else: continue
-
-        o         = row["o"]
-        c         = row["c"]
-        last_high = row["roll_high"]
-        last_low  = row["roll_low"]
-        atr_val   = row["atr"]
-
-        if pd.isna(last_high) or pd.isna(last_low) or pd.isna(atr_val):
-            continue
-
-        sig = None
-        if direction == "LONG"  and o <= last_high and c > last_high: sig = "LONG"
-        if direction == "SHORT" and o >= last_low  and c < last_low:  sig = "SHORT"
-
-        if sig:
+        # ── LONG ──
+        if (
+            ema50 > ema200                          # yukari trend
+            and c > ema200                          # fiyat EMA200 ustunde
+            and c >= ema50 - PULLBACK_ATR * atr     # pullback zone alt sinir
+            and c <= ema50 + 0.5 * atr              # pullback zone ust sinir (ema50 civarinda)
+            and c > ema21                           # momentum teyidi
+            and c > o                               # bullish mum
+            and (i - last_long_bar) >= COOLDOWN_BARS
+        ):
             signals.append({
                 "idx":        i,
                 "ts":         row["ts"],
-                "direction":  sig,
+                "direction":  "LONG",
                 "entry":      c,
                 "swing_low":  row["swing_low"],
                 "swing_high": row["swing_high"],
-                "atr":        atr_val,
+                "atr":        atr,
             })
+            last_long_bar = i
+
+        # ── SHORT ──
+        elif (
+            ema50 < ema200                          # asagi trend
+            and c < ema200                          # fiyat EMA200 altinda
+            and c <= ema50 + PULLBACK_ATR * atr     # pullback zone ust sinir
+            and c >= ema50 - 0.5 * atr              # pullback zone alt sinir
+            and c < ema21                           # momentum teyidi
+            and c < o                               # bearish mum
+            and (i - last_short_bar) >= COOLDOWN_BARS
+        ):
+            signals.append({
+                "idx":        i,
+                "ts":         row["ts"],
+                "direction":  "SHORT",
+                "entry":      c,
+                "swing_low":  row["swing_low"],
+                "swing_high": row["swing_high"],
+                "atr":        atr,
+            })
+            last_short_bar = i
 
     return signals
 
@@ -139,9 +183,11 @@ def smart_stop(sig):
     atr   = sig["atr"]
     if sig["direction"] == "LONG":
         swing = sig["swing_low"]
-        return min(swing, entry - atr) if not pd.isna(swing) else entry - atr
+        sl = min(swing, entry - atr) if not pd.isna(swing) else entry - atr
+        return sl
     swing = sig["swing_high"]
-    return max(swing, entry + atr) if not pd.isna(swing) else entry + atr
+    sl = max(swing, entry + atr) if not pd.isna(swing) else entry + atr
+    return sl
 
 def smart_tp(entry, sl, direction):
     risk = abs(entry - sl)
@@ -162,14 +208,12 @@ def position_size(entry, sl, direction):
 
 # ─────────────────────────────────────────
 # BACKTEST MOTORU — HEDGE MODE
-# Her sinyal bağımsız açılır, birbirini kapatmaz
 # ─────────────────────────────────────────
 
 def run_backtest(df, signals):
-    capital    = INITIAL_CAPITAL
-    trades     = []
-    open_trades = []   # Aynı anda birden fazla açık trade
-    used_ts    = set() # Aynı muma ait aynı yönde tekrar girme
+    capital     = INITIAL_CAPITAL
+    trades      = []
+    open_trades = []
 
     high_arr = df["h"].values
     low_arr  = df["l"].values
@@ -182,7 +226,6 @@ def run_backtest(df, signals):
         h = high_arr[i]
         l = low_arr[i]
 
-        # Açık tradeleri kontrol et
         still_open = []
         for t in open_trades:
             sl = t["sl"]
@@ -216,20 +259,14 @@ def run_backtest(df, signals):
 
         open_trades = still_open
 
-        # Yeni sinyaller — hedge mode: hepsini aç
         if i in sig_map:
             for sig in sig_map[i]:
-                key = (sig["ts"], sig["direction"])
-                if key in used_ts:
-                    continue  # Aynı muma ait aynı yönde sadece 1 kez gir
-                used_ts.add(key)
-
                 entry = sig["entry"]
                 sl    = smart_stop(sig)
                 tp    = smart_tp(entry, sl, sig["direction"])
                 qty   = position_size(entry, sl, sig["direction"])
 
-                if qty > 0 and sl != entry:
+                if qty > 0 and abs(entry - sl) > 0:
                     open_trades.append({
                         "entry_ts":  sig["ts"],
                         "direction": sig["direction"],
@@ -273,13 +310,13 @@ def analyze(trades, final_capital):
     daily_pnl = df_t.set_index("exit_ts")["pnl_usd"].resample("D").sum()
     sharpe    = (daily_pnl.mean() / daily_pnl.std() * np.sqrt(252)) if daily_pnl.std() > 0 else 0
 
-    long_trades  = df_t[df_t["direction"] == "LONG"]
-    short_trades = df_t[df_t["direction"] == "SHORT"]
-    long_wr  = (long_trades["result"] == "WIN").mean() * 100  if len(long_trades)  > 0 else 0
-    short_wr = (short_trades["result"] == "WIN").mean() * 100 if len(short_trades) > 0 else 0
+    long_t  = df_t[df_t["direction"] == "LONG"]
+    short_t = df_t[df_t["direction"] == "SHORT"]
+    long_wr  = (long_t["result"]  == "WIN").mean() * 100 if len(long_t)  > 0 else 0
+    short_wr = (short_t["result"] == "WIN").mean() * 100 if len(short_t) > 0 else 0
 
     print("\n" + "="*55)
-    print("     BACKTEST SONUCLARI — BTC/USDT 15m (HEDGE)")
+    print("   BACKTEST SONUCLARI — BTC/USDT 15m (PULLBACK)")
     print("="*55)
     print(f"  Baslangic Sermaye  : ${INITIAL_CAPITAL:,.2f}")
     print(f"  Final Sermaye      : ${final_capital:,.2f}")
@@ -287,8 +324,8 @@ def analyze(trades, final_capital):
     print(f"  Toplam Trade       : {total}")
     print(f"  Kazanan            : {wins}  ({win_rate:.1f}%)")
     print(f"  Kaybeden           : {losses}")
-    print(f"  Long  Win Rate     : {long_wr:.1f}%  ({len(long_trades)} trade)")
-    print(f"  Short Win Rate     : {short_wr:.1f}%  ({len(short_trades)} trade)")
+    print(f"  Long  Win Rate     : {long_wr:.1f}%  ({len(long_t)} trade)")
+    print(f"  Short Win Rate     : {short_wr:.1f}%  ({len(short_t)} trade)")
     print(f"  Ort. Kazanc        : ${avg_win:+.2f}")
     print(f"  Ort. Kayip         : ${avg_loss:+.2f}")
     print(f"  Profit Factor      : {profit_factor:.2f}")
@@ -308,11 +345,15 @@ def analyze(trades, final_capital):
 
 def plot_results(df_t, df_price):
     fig, axes = plt.subplots(3, 1, figsize=(14, 12))
-    fig.suptitle("BTC/USDT 15m — Backtest (Hedge Mode)", fontsize=14, fontweight="bold")
+    fig.suptitle("BTC/USDT 15m — EMA Pullback Strateji", fontsize=14, fontweight="bold")
 
     ax1 = axes[0]
     ax1.plot(df_t["exit_ts"], df_t["capital"], color="#00b4d8", linewidth=1.5)
     ax1.axhline(INITIAL_CAPITAL, color="gray", linestyle="--", linewidth=0.8, label="Baslangic")
+    ax1.fill_between(df_t["exit_ts"], INITIAL_CAPITAL, df_t["capital"],
+                     where=df_t["capital"] >= INITIAL_CAPITAL, alpha=0.15, color="#06d6a0")
+    ax1.fill_between(df_t["exit_ts"], INITIAL_CAPITAL, df_t["capital"],
+                     where=df_t["capital"] < INITIAL_CAPITAL,  alpha=0.15, color="#ef476f")
     ax1.set_title("Equity Curve")
     ax1.set_ylabel("Sermaye (USD)")
     ax1.legend()
@@ -331,8 +372,8 @@ def plot_results(df_t, df_price):
     ax3.plot(df_price["ts"], df_price["c"], color="#adb5bd", linewidth=0.6, label="BTC Fiyat")
     longs  = df_t[df_t["direction"] == "LONG"]
     shorts = df_t[df_t["direction"] == "SHORT"]
-    ax3.scatter(longs["entry_ts"],  longs["entry"],  marker="^", color="#06d6a0", s=40, zorder=5, label="Long")
-    ax3.scatter(shorts["entry_ts"], shorts["entry"], marker="v", color="#ef476f", s=40, zorder=5, label="Short")
+    ax3.scatter(longs["entry_ts"],  longs["entry"],  marker="^", color="#06d6a0", s=50, zorder=5, label="Long")
+    ax3.scatter(shorts["entry_ts"], shorts["entry"], marker="v", color="#ef476f", s=50, zorder=5, label="Short")
     ax3.set_title("BTC Fiyat + Giris Noktalari")
     ax3.set_ylabel("Fiyat (USD)")
     ax3.legend(loc="upper left", fontsize=8)
