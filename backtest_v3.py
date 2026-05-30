@@ -11,21 +11,43 @@ TIMEFRAME = "1h"
 LEVERAGE = 50
 RISK = 10
 
-FEE_RATE = 0.0006       # taker fee
-SLIPPAGE = 0.0005       # market slippage
-FUNDING = 0.0001        # simplified funding
+FEE_RATE = 0.0006
+SLIPPAGE = 0.0005
+FUNDING = 0.0001
 
-# =========================
-# EXCHANGE + DATA
-# =========================
 exchange = ccxt.okx({
     "options": {"defaultType": "swap"}
 })
 
-bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
+# =========================
+# 6 MONTH DATA FETCH
+# =========================
+def fetch_6_months():
+    ohlcv = []
+    since = exchange.milliseconds() - (180 * 24 * 60 * 60 * 1000)
 
-df = pd.DataFrame(bars, columns=["ts","o","h","l","c","v"])
-df = df.tail(48).reset_index(drop=True)  # last ~2 days
+    while True:
+        bars = exchange.fetch_ohlcv(
+            SYMBOL,
+            timeframe=TIMEFRAME,
+            since=since,
+            limit=300
+        )
+
+        if not bars:
+            break
+
+        ohlcv += bars
+        since = bars[-1][0] + 1
+
+        if len(bars) < 300:
+            break
+
+    df = pd.DataFrame(ohlcv, columns=["ts","o","h","l","c","v"])
+    return df
+
+df = fetch_6_months()
+df = df.drop_duplicates().reset_index(drop=True)
 
 # =========================
 # INDICATORS
@@ -37,7 +59,7 @@ def trend(df):
 
 
 def signal(df):
-    if len(df) < 20:
+    if len(df) < 30:
         return None
 
     direction = trend(df)
@@ -59,13 +81,13 @@ def signal(df):
 
 
 # =========================
-# BACKTEST
+# BACKTEST ENGINE
 # =========================
 equity = 0
 equity_curve = []
 trades = []
 
-for i in range(20, len(df) - 5):
+for i in range(30, len(df) - 5):
 
     sub = df.iloc[:i]
     sig = signal(sub)
@@ -73,15 +95,14 @@ for i in range(20, len(df) - 5):
     if not sig:
         continue
 
-    # ENTRY = NEXT CANDLE (REALISTIC FIX)
     entry = df["c"].iloc[i+1]
 
+    # slippage
     if sig == "LONG":
         entry *= (1 + SLIPPAGE)
     else:
         entry *= (1 - SLIPPAGE)
 
-    # ATR STOP
     atr = (df["h"] - df["l"]).rolling(14).mean().iloc[i]
     if np.isnan(atr):
         continue
@@ -90,7 +111,6 @@ for i in range(20, len(df) - 5):
     risk_dist = abs(entry - sl)
     tp = entry + risk_dist * 1.8 if sig == "LONG" else entry - risk_dist * 1.8
 
-    # FUTURE PRICE ACTION
     future = df.iloc[i+2:i+10]
 
     result = None
@@ -104,7 +124,6 @@ for i in range(20, len(df) - 5):
             if r["h"] >= tp:
                 result = 1
                 break
-
         else:
             if r["h"] >= sl:
                 result = -1
@@ -122,10 +141,10 @@ for i in range(20, len(df) - 5):
     else:
         pnl = -RISK
 
-    # FEES (entry + exit * leverage effect)
+    # fees
     pnl -= (RISK * LEVERAGE * FEE_RATE * 2)
 
-    # FUNDING COST
+    # funding
     pnl -= RISK * FUNDING
 
     equity += pnl
@@ -152,10 +171,10 @@ for x in equity_curve:
     if dd > max_dd:
         max_dd = dd
 
-print("\n===== REAL BTC BACKTEST V3 =====")
+print("\n===== BTC BACKTEST V3 (6 MONTH) =====")
 print("Symbol:", SYMBOL)
-print("Timeframe: 1H (Last ~2 days)")
-print("----------------------------")
+print("Timeframe:", TIMEFRAME)
+print("-----------------------------------")
 print("Trades:", total)
 print("Wins:", wins)
 print("Losses:", losses)
