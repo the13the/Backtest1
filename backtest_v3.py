@@ -8,19 +8,16 @@ import numpy as np
 SYMBOL = "BTC/USDT:USDT"
 TIMEFRAME = "1h"
 
-LEVERAGE = 50
 RISK = 10
-
-FEE_RATE = 0.0006
+FEE = 0.0006
 SLIPPAGE = 0.0005
-FUNDING = 0.0001
 
 exchange = ccxt.okx({"options": {"defaultType": "swap"}})
 
 # =========================
 # DATA (6 MONTHS)
 # =========================
-def fetch_6m():
+def fetch_data():
     data = []
     since = exchange.milliseconds() - (180 * 24 * 60 * 60 * 1000)
 
@@ -36,65 +33,40 @@ def fetch_6m():
     df = pd.DataFrame(data, columns=["ts","o","h","l","c","v"])
     return df.drop_duplicates().reset_index(drop=True)
 
-df = fetch_6m()
+df = fetch_data()
 
 # =========================
-# INDICATORS (V4 UPGRADE)
+# LIQUIDITY SWEEP LOGIC
 # =========================
-def ema(series, n):
-    return series.ewm(span=n, adjust=False).mean()
-
-def trend_4h(df):
-    # simulate higher timeframe trend (4H = 4 candles)
-    c = df["c"].resample(None).mean()  # placeholder stability
-    ema50 = ema(df["c"], 50)
-    ema200 = ema(df["c"], 200)
-    return ema50.iloc[-1] > ema200.iloc[-1]
-
-def trend(df):
-    ema50 = ema(df["c"], 50)
-    ema200 = ema(df["c"], 200)
-    return "LONG" if ema50.iloc[-1] > ema200.iloc[-1] else "SHORT"
-
 def signal(df):
-    if len(df) < 60:
+    if len(df) < 30:
         return None
 
-    direction = trend(df)
+    i = len(df) - 2
 
-    highs = df["h"].rolling(20).max()
-    lows = df["l"].rolling(20).min()
+    prev_high = df["h"].iloc[i-20:i].max()
+    prev_low = df["l"].iloc[i-20:i].min()
 
-    vol = df["v"].rolling(20).mean()
-    last_vol = df["v"].iloc[-1]
+    current = df.iloc[i]
 
-    i = len(df) - 1
+    # BUY SIDE LIQUIDITY SWEEP (false breakout up → short)
+    if current["h"] > prev_high and current["c"] < prev_high:
+        return "SHORT"
 
-    price = df["c"].iloc[i]
-    prev_high = highs.iloc[i-1]
-    prev_low = lows.iloc[i-1]
-
-    # volume filter (IMPORTANT)
-    vol_ok = last_vol > vol.iloc[i-1]
-
-    if direction == "LONG":
-        if price > prev_high and vol_ok:
-            return "LONG"
-
-    if direction == "SHORT":
-        if price < prev_low and vol_ok:
-            return "SHORT"
+    # SELL SIDE LIQUIDITY SWEEP (false breakdown → long)
+    if current["l"] < prev_low and current["c"] > prev_low:
+        return "LONG"
 
     return None
 
 # =========================
-# BACKTEST ENGINE
+# BACKTEST
 # =========================
 equity = 0
 equity_curve = []
 trades = []
 
-for i in range(60, len(df)-5):
+for i in range(30, len(df)-5):
 
     sub = df.iloc[:i]
     sig = signal(sub)
@@ -104,20 +76,18 @@ for i in range(60, len(df)-5):
 
     entry = df["c"].iloc[i+1]
 
-    # slippage
-    entry *= (1 + SLIPPAGE) if sig == "LONG" else (1 - SLIPPAGE)
+    # SL / TP (structure based)
+    lookback_high = df["h"].iloc[i-10:i].max()
+    lookback_low = df["l"].iloc[i-10:i].min()
 
-    # ATR
-    atr = (df["h"] - df["l"]).rolling(14).mean().iloc[i]
-    if np.isnan(atr):
-        continue
-
-    sl = entry - atr if sig == "LONG" else entry + atr
-
-    risk_dist = abs(entry - sl)
-
-    # V4 IMPROVEMENT: adaptive RR (not fixed)
-    tp = entry + risk_dist * 2.2 if sig == "LONG" else entry - risk_dist * 2.2
+    if sig == "LONG":
+        sl = lookback_low
+        risk_dist = abs(entry - sl)
+        tp = entry + risk_dist * 2
+    else:
+        sl = lookback_high
+        risk_dist = abs(sl - entry)
+        tp = entry - risk_dist * 2
 
     future = df.iloc[i+2:i+12]
 
@@ -132,6 +102,7 @@ for i in range(60, len(df)-5):
             if r["h"] >= tp:
                 result = 1
                 break
+
         else:
             if r["h"] >= sl:
                 result = -1
@@ -143,35 +114,33 @@ for i in range(60, len(df)-5):
     if result is None:
         continue
 
-    pnl = RISK * 2.2 if result == 1 else -RISK
+    pnl = RISK * 2 if result == 1 else -RISK
 
-    # fees + funding
-    pnl -= (RISK * LEVERAGE * FEE_RATE * 2)
-    pnl -= RISK * FUNDING
+    # fees + slippage
+    pnl -= RISK * FEE * 2 * 50
+    pnl -= RISK * SLIPPAGE
 
     equity += pnl
     equity_curve.append(equity)
     trades.append(result)
 
 # =========================
-# METRICS
+# RESULTS
 # =========================
 wins = trades.count(1)
 losses = trades.count(-1)
 total = len(trades)
 
-winrate = (wins / total * 100) if total > 0 else 0
+winrate = (wins / total * 100) if total else 0
 
 peak = -1e9
 max_dd = 0
 
 for x in equity_curve:
-    if x > peak:
-        peak = x
-    dd = peak - x
-    max_dd = max(max_dd, dd)
+    peak = max(peak, x)
+    max_dd = max(max_dd, peak - x)
 
-print("\n===== BTC BACKTEST V4 (OPTIMIZED) =====")
+print("\n===== BTC V5 LIQUIDITY SWEEP =====")
 print("Trades:", total)
 print("Wins:", wins)
 print("Losses:", losses)
