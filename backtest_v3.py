@@ -1,20 +1,16 @@
 """
-BTC/USDT — 15 Dakikalık Backtest
-Veri kaynagi: yfinance (GitHub Actions ile uyumlu, kisitlama yok)
-Son 6 ay verisi, orijinal strateji mantigi korundu.
-
-Kurulum:
-    pip install yfinance pandas numpy matplotlib
-
-Calistirma:
-    python backtest_v3.py
+BTC/USDT — 15 Dakikalık Backtest (Hedge Mode)
+- Her sinyal bağımsız trade olarak açılır
+- Aynı anda birden fazla long/short açık olabilir
+- Hiçbir trade diğerini kapatmaz
+Veri: yfinance (GitHub Actions uyumlu)
 """
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")  # GitHub Actions: ekransiz ortam icin
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta, timezone
 
@@ -38,7 +34,6 @@ def fetch_ohlcv(months=6):
     start = end - timedelta(days=months * 30)
     print(f"Veri cekiliyor: {SYMBOL} {TIMEFRAME} | {start.strftime('%Y-%m-%d')} - {end.strftime('%Y-%m-%d')}")
 
-    # yfinance 15m icin max 60 gun destekler, parcali cekilmeli
     all_chunks = []
     chunk_end = end
     while chunk_end > start:
@@ -60,13 +55,10 @@ def fetch_ohlcv(months=6):
 
     df = pd.concat(all_chunks).sort_index()
     df = df[~df.index.duplicated(keep="first")]
-
-    # Sutun adlarini standartlastir
     df.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df.columns]
     df = df.rename(columns={"open": "o", "high": "h", "low": "l", "close": "c", "volume": "v"})
     df["ts"] = df.index
     df = df.reset_index(drop=True)
-
     print(f"Toplam {len(df)} mum yuklendi.")
     return df
 
@@ -100,10 +92,10 @@ def generate_signals(df):
 
     signals = []
     for i in range(200, len(df)):
-        row   = df.iloc[i]
-        ema50 = row["ema50"]
-        ema200= row["ema200"]
-        price = row["c"]
+        row    = df.iloc[i]
+        ema50  = row["ema50"]
+        ema200 = row["ema200"]
+        price  = row["c"]
 
         if pd.isna(ema50) or pd.isna(ema200):
             continue
@@ -169,69 +161,83 @@ def position_size(entry, sl, direction):
     return 0 if dist <= 0 else risk_amount(entry, sl, direction) / dist
 
 # ─────────────────────────────────────────
-# BACKTEST MOTORU
+# BACKTEST MOTORU — HEDGE MODE
+# Her sinyal bağımsız açılır, birbirini kapatmaz
 # ─────────────────────────────────────────
 
 def run_backtest(df, signals):
     capital    = INITIAL_CAPITAL
     trades     = []
-    open_trade = None
-    used_ts    = set()
+    open_trades = []   # Aynı anda birden fazla açık trade
+    used_ts    = set() # Aynı muma ait aynı yönde tekrar girme
 
     high_arr = df["h"].values
     low_arr  = df["l"].values
     ts_arr   = df["ts"].values
-    sig_map  = {s["idx"]: s for s in signals}
+    sig_map  = {}
+    for s in signals:
+        sig_map.setdefault(s["idx"], []).append(s)
 
     for i in range(len(df)):
-        if open_trade:
-            h  = high_arr[i]
-            l  = low_arr[i]
-            sl = open_trade["sl"]
-            tp = open_trade["tp"]
-            d  = open_trade["direction"]
+        h = high_arr[i]
+        l = low_arr[i]
+
+        # Açık tradeleri kontrol et
+        still_open = []
+        for t in open_trades:
+            sl = t["sl"]
+            tp = t["tp"]
+            d  = t["direction"]
 
             hit_sl = (d == "LONG"  and l <= sl) or (d == "SHORT" and h >= sl)
             hit_tp = (d == "LONG"  and h >= tp) or (d == "SHORT" and l <= tp)
 
             if hit_sl or hit_tp:
                 exit_price   = sl if hit_sl else tp
-                pnl_per_unit = (exit_price - open_trade["entry"]) if d == "LONG" \
-                               else (open_trade["entry"] - exit_price)
-                pnl_usd  = pnl_per_unit * open_trade["qty"]
+                pnl_per_unit = (exit_price - t["entry"]) if d == "LONG" \
+                               else (t["entry"] - exit_price)
+                pnl_usd  = pnl_per_unit * t["qty"]
                 capital += pnl_usd
                 trades.append({
-                    "entry_ts":  open_trade["entry_ts"],
+                    "entry_ts":  t["entry_ts"],
                     "exit_ts":   ts_arr[i],
                     "direction": d,
-                    "entry":     open_trade["entry"],
+                    "entry":     t["entry"],
                     "exit":      exit_price,
                     "sl":        sl,
                     "tp":        tp,
-                    "qty":       open_trade["qty"],
+                    "qty":       t["qty"],
                     "pnl_usd":   round(pnl_usd, 4),
                     "result":    "WIN" if hit_tp else "LOSS",
                     "capital":   round(capital, 2),
                 })
-                open_trade = None
+            else:
+                still_open.append(t)
 
-        if i in sig_map and open_trade is None:
-            sig = sig_map[i]
-            if sig["ts"] not in used_ts:
+        open_trades = still_open
+
+        # Yeni sinyaller — hedge mode: hepsini aç
+        if i in sig_map:
+            for sig in sig_map[i]:
+                key = (sig["ts"], sig["direction"])
+                if key in used_ts:
+                    continue  # Aynı muma ait aynı yönde sadece 1 kez gir
+                used_ts.add(key)
+
                 entry = sig["entry"]
                 sl    = smart_stop(sig)
                 tp    = smart_tp(entry, sl, sig["direction"])
                 qty   = position_size(entry, sl, sig["direction"])
+
                 if qty > 0 and sl != entry:
-                    open_trade = {
+                    open_trades.append({
                         "entry_ts":  sig["ts"],
                         "direction": sig["direction"],
                         "entry":     entry,
                         "sl":        sl,
                         "tp":        tp,
                         "qty":       qty,
-                    }
-                    used_ts.add(sig["ts"])
+                    })
 
     return trades, capital
 
@@ -267,21 +273,28 @@ def analyze(trades, final_capital):
     daily_pnl = df_t.set_index("exit_ts")["pnl_usd"].resample("D").sum()
     sharpe    = (daily_pnl.mean() / daily_pnl.std() * np.sqrt(252)) if daily_pnl.std() > 0 else 0
 
-    print("\n" + "="*52)
-    print("      BACKTEST SONUCLARI — BTC/USDT 15m")
-    print("="*52)
+    long_trades  = df_t[df_t["direction"] == "LONG"]
+    short_trades = df_t[df_t["direction"] == "SHORT"]
+    long_wr  = (long_trades["result"] == "WIN").mean() * 100  if len(long_trades)  > 0 else 0
+    short_wr = (short_trades["result"] == "WIN").mean() * 100 if len(short_trades) > 0 else 0
+
+    print("\n" + "="*55)
+    print("     BACKTEST SONUCLARI — BTC/USDT 15m (HEDGE)")
+    print("="*55)
     print(f"  Baslangic Sermaye  : ${INITIAL_CAPITAL:,.2f}")
     print(f"  Final Sermaye      : ${final_capital:,.2f}")
     print(f"  Net PnL            : ${net_pnl:+,.2f}  ({(final_capital/INITIAL_CAPITAL-1)*100:+.1f}%)")
     print(f"  Toplam Trade       : {total}")
     print(f"  Kazanan            : {wins}  ({win_rate:.1f}%)")
     print(f"  Kaybeden           : {losses}")
+    print(f"  Long  Win Rate     : {long_wr:.1f}%  ({len(long_trades)} trade)")
+    print(f"  Short Win Rate     : {short_wr:.1f}%  ({len(short_trades)} trade)")
     print(f"  Ort. Kazanc        : ${avg_win:+.2f}")
     print(f"  Ort. Kayip         : ${avg_loss:+.2f}")
     print(f"  Profit Factor      : {profit_factor:.2f}")
     print(f"  Max Drawdown       : {max_dd:.2f}%")
     print(f"  Sharpe (yillik)    : {sharpe:.2f}")
-    print("="*52)
+    print("="*55)
 
     cols = ["entry_ts", "direction", "entry", "exit", "pnl_usd", "result", "capital"]
     print("\n-- Son 10 Trade --")
@@ -295,7 +308,7 @@ def analyze(trades, final_capital):
 
 def plot_results(df_t, df_price):
     fig, axes = plt.subplots(3, 1, figsize=(14, 12))
-    fig.suptitle("BTC/USDT 15m — Backtest Sonuclari", fontsize=14, fontweight="bold")
+    fig.suptitle("BTC/USDT 15m — Backtest (Hedge Mode)", fontsize=14, fontweight="bold")
 
     ax1 = axes[0]
     ax1.plot(df_t["exit_ts"], df_t["capital"], color="#00b4d8", linewidth=1.5)
