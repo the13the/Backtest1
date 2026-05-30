@@ -1,12 +1,13 @@
 """
-BTC/USDT — Binance 15 Dakikalık Backtest
+BTC/USDT — Bybit 15 Dakikalık Backtest
 Son 6 ay verisi, orijinal strateji mantığı korundu.
+(Binance ABD lokasyonlarında 451 kısıtlaması verdiği için Bybit kullanılıyor)
 
 Kurulum:
     pip install ccxt pandas numpy matplotlib
 
 Çalıştırma:
-    python backtest_btc_15m.py
+    python backtest_v3.py
 """
 
 import ccxt
@@ -31,9 +32,9 @@ INITIAL_CAPITAL = 1000.0   # Başlangıç bakiyesi (USD)
 # VERİ ÇEKİMİ
 # ─────────────────────────────────────────
 
-def fetch_binance_ohlcv(symbol=SYMBOL, timeframe=TIMEFRAME, months=6):
+def fetch_bybit_ohlcv(symbol=SYMBOL, timeframe=TIMEFRAME, months=6):
     """Binance'ten son 6 aylık 15 dakikalık mum verisini çeker."""
-    exchange = ccxt.binance({"enableRateLimit": True})
+    exchange = ccxt.bybit({"enableRateLimit": True})
 
     since_dt = datetime.now(timezone.utc) - timedelta(days=months * 30)
     since_ms  = int(since_dt.timestamp() * 1000)
@@ -47,7 +48,7 @@ def fetch_binance_ohlcv(symbol=SYMBOL, timeframe=TIMEFRAME, months=6):
             break
         all_bars.extend(bars)
         last_ts = bars[-1][0]
-        if last_ts >= exchange.milliseconds() - 60_000:
+        if last_ts >= int(datetime.now(timezone.utc).timestamp() * 1000) - 60_000:
             break
         since_ms = last_ts + 1
         print(f"  {len(all_bars)} mum indirildi...", end="\r")
@@ -386,7 +387,7 @@ def plot_results(df_t, df_price):
 
 if __name__ == "__main__":
     # 1) Veri çek
-    df = fetch_binance_ohlcv(months=6)
+    df = fetch_bybit_ohlcv(months=6)
 
     # 2) Sinyaller üret
     print("Sinyaller hesaplanıyor...")
