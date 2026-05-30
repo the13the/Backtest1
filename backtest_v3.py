@@ -159,7 +159,7 @@ def generate_signals(df):
             continue
 
         # ADX < 25 → chop/yatay piyasa → islem yapma
-        if adx < 25:
+        if adx < 20:
             continue
 
         # ── LONG ──
