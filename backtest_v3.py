@@ -32,9 +32,9 @@ INITIAL_CAPITAL = 1000.0   # Başlangıç bakiyesi (USD)
 # VERİ ÇEKİMİ
 # ─────────────────────────────────────────
 
-def fetch_bybit_ohlcv(symbol=SYMBOL, timeframe=TIMEFRAME, months=6):
+def fetch_kucoin_ohlcv(symbol=SYMBOL, timeframe=TIMEFRAME, months=6):
     """Binance'ten son 6 aylık 15 dakikalık mum verisini çeker."""
-    exchange = ccxt.bybit({"enableRateLimit": True})
+    exchange = ccxt.kucoin({"enableRateLimit": True})
 
     since_dt = datetime.now(timezone.utc) - timedelta(days=months * 30)
     since_ms  = int(since_dt.timestamp() * 1000)
@@ -387,7 +387,7 @@ def plot_results(df_t, df_price):
 
 if __name__ == "__main__":
     # 1) Veri çek
-    df = fetch_bybit_ohlcv(months=6)
+    df = fetch_kucoin_ohlcv(months=6)
 
     # 2) Sinyaller üret
     print("Sinyaller hesaplanıyor...")
