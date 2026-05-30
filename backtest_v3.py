@@ -103,12 +103,39 @@ def calc_ema(series, span):
 #   5. Bearish mum
 # ─────────────────────────────────────────
 
+def calc_adx(df, period=14):
+    """ADX hesapla — trend gucu olcutu. 25 ustu guclu trend."""
+    high = df["h"]
+    low  = df["l"]
+    close= df["c"]
+
+    plus_dm  = high.diff()
+    minus_dm = -low.diff()
+    plus_dm[plus_dm  < 0] = 0
+    minus_dm[minus_dm < 0] = 0
+    plus_dm[(plus_dm > 0) & (plus_dm <= minus_dm)] = 0
+    minus_dm[(minus_dm > 0) & (minus_dm <= plus_dm)] = 0
+
+    hl  = high - low
+    hc  = (high - close.shift()).abs()
+    lc  = (low  - close.shift()).abs()
+    tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+
+    atr14      = tr.ewm(alpha=1/period, adjust=False).mean()
+    plus_di    = 100 * plus_dm.ewm(alpha=1/period,  adjust=False).mean() / atr14
+    minus_di   = 100 * minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr14
+    dx         = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di)).fillna(0)
+    adx        = dx.ewm(alpha=1/period, adjust=False).mean()
+    return adx
+
+
 def generate_signals(df):
     df = df.copy()
     df["ema21"]  = calc_ema(df["c"], 21)
     df["ema50"]  = calc_ema(df["c"], 50)
     df["ema200"] = calc_ema(df["c"], 200)
     df["atr"]    = calc_atr(df, 14)
+    df["adx"]    = calc_adx(df, 14)   # ADX filtresi
 
     # Swing SL icin
     df["swing_low"]  = df["l"].rolling(10).min().shift(1)
@@ -124,10 +151,15 @@ def generate_signals(df):
         ema50  = row["ema50"]
         ema200 = row["ema200"]
         atr    = row["atr"]
+        adx    = row["adx"]
         c      = row["c"]
         o      = row["o"]
 
-        if pd.isna(ema21) or pd.isna(ema50) or pd.isna(ema200) or pd.isna(atr) or atr == 0:
+        if pd.isna(ema21) or pd.isna(ema50) or pd.isna(ema200) or pd.isna(atr) or pd.isna(adx) or atr == 0:
+            continue
+
+        # ADX < 25 → chop/yatay piyasa → islem yapma
+        if adx < 25:
             continue
 
         # ── LONG ──
@@ -135,7 +167,7 @@ def generate_signals(df):
             ema50 > ema200                          # yukari trend
             and c > ema200                          # fiyat EMA200 ustunde
             and c >= ema50 - PULLBACK_ATR * atr     # pullback zone alt sinir
-            and c <= ema50 + 0.5 * atr              # pullback zone ust sinir (ema50 civarinda)
+            and c <= ema50 + 0.5 * atr              # pullback zone ust sinir
             and c > ema21                           # momentum teyidi
             and c > o                               # bullish mum
             and (i - last_long_bar) >= COOLDOWN_BARS
