@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 # PARAMETRELER
 # ─────────────────────────────────────────
 SYMBOL             = "BTC-USD"
-TIMEFRAME          = "15m"
+TIMEFRAME          = "1h"
 LEVERAGE           = 50
 RISK_PER_TRADE_USD = 10
 SAFE_RISK_USD      = 5
@@ -46,7 +46,7 @@ def fetch_ohlcv(months=6):
     all_chunks = []
     chunk_end = end
     while chunk_end > start:
-        chunk_start = max(chunk_end - timedelta(days=58), start)
+        chunk_start = max(chunk_end - timedelta(days=89), start)
         df_chunk = yf.download(
             SYMBOL,
             start=chunk_start.strftime("%Y-%m-%d"),
