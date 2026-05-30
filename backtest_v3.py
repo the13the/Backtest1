@@ -38,7 +38,7 @@ COOLDOWN_BARS = 8
 # VERI CEKIMI
 # ─────────────────────────────────────────
 
-def fetch_ohlcv(months=6):
+def fetch_ohlcv(months=12):
     end   = datetime.now(timezone.utc)
     start = end - timedelta(days=months * 30)
     print(f"Veri cekiliyor: {SYMBOL} {TIMEFRAME} | {start.strftime('%Y-%m-%d')} - {end.strftime('%Y-%m-%d')}")
@@ -388,7 +388,7 @@ def plot_results(df_t, df_price):
 # ─────────────────────────────────────────
 
 if __name__ == "__main__":
-    df = fetch_ohlcv(months=6)
+    df = fetch_ohlcv(months=12)
 
     print("Sinyaller hesaplaniyor...")
     signals = generate_signals(df)
