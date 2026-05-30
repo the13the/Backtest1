@@ -1,5 +1,6 @@
 """
 BTC/USDT 1H Backtest — Son 12 Ay
+Kaynak: Bybit v5 public API (API key gerekmez)
 Strateji: EMA50/200 trend filtresi + 20-bar breakout sinyali
 
 Kullanım:
@@ -11,9 +12,10 @@ import requests
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 # ─── PARAMETRELER ─────────────────────────────────────────────────────────────
+SYMBOL       = "BTCUSDT"
 LEVERAGE     = 50
 RISK_USD     = 10
 SAFE_USD     = 5
@@ -25,167 +27,57 @@ MONTHS       = 12
 
 # ── 1. VERİ ───────────────────────────────────────────────────────────────────
 
-def fetch_binance_vision():
-    """Binance public data mirror — coğrafi kısıtlama yok."""
+def fetch_bybit(months=MONTHS):
+    """Bybit v5 — interval=60 (1 saatlik), geriye doğru sayfalama."""
     end_ts   = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ts = end_ts - MONTHS * 30 * 24 * 3600 * 1000
-    all_bars = []
-    cur = start_ts
-    session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0"})
-
-    while cur < end_ts:
-        url = (
-            "https://data-api.binance.vision/api/v3/klines"
-            f"?symbol=BTCUSDT&interval=1h"
-            f"&startTime={cur}&endTime={end_ts}&limit=1000"
-        )
-        r = session.get(url, timeout=20)
-        r.raise_for_status()
-        bars = r.json()
-        if not bars:
-            break
-        all_bars.extend(bars)
-        cur = bars[-1][0] + 1
-        dt  = datetime.fromtimestamp(bars[-1][0] / 1000).strftime("%Y-%m-%d")
-        print(f"  binance.vision  {len(all_bars):>5} bar — {dt}")
-        time.sleep(0.15)
-        if len(bars) < 1000:
-            break
-    return all_bars
-
-
-def fetch_binance_com():
-    """api.binance.com — bazı bölgelerden çalışmaz."""
-    end_ts   = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ts = end_ts - MONTHS * 30 * 24 * 3600 * 1000
-    all_bars = []
-    cur = start_ts
-    session = requests.Session()
-
-    while cur < end_ts:
-        url = (
-            "https://api.binance.com/api/v3/klines"
-            f"?symbol=BTCUSDT&interval=1h"
-            f"&startTime={cur}&endTime={end_ts}&limit=1000"
-        )
-        r = session.get(url, timeout=20)
-        r.raise_for_status()
-        bars = r.json()
-        if not bars:
-            break
-        all_bars.extend(bars)
-        cur = bars[-1][0] + 1
-        dt  = datetime.fromtimestamp(bars[-1][0] / 1000).strftime("%Y-%m-%d")
-        print(f"  binance.com  {len(all_bars):>5} bar — {dt}")
-        time.sleep(0.15)
-        if len(bars) < 1000:
-            break
-    return all_bars
-
-
-def fetch_binance_us():
-    """api.binance.us — US mirror."""
-    end_ts   = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ts = end_ts - MONTHS * 30 * 24 * 3600 * 1000
-    all_bars = []
-    cur = start_ts
-    session = requests.Session()
-
-    while cur < end_ts:
-        url = (
-            "https://api.binance.us/api/v3/klines"
-            f"?symbol=BTCUSDT&interval=1h"
-            f"&startTime={cur}&endTime={end_ts}&limit=1000"
-        )
-        r = session.get(url, timeout=20)
-        r.raise_for_status()
-        bars = r.json()
-        if not bars:
-            break
-        all_bars.extend(bars)
-        cur = bars[-1][0] + 1
-        dt  = datetime.fromtimestamp(bars[-1][0] / 1000).strftime("%Y-%m-%d")
-        print(f"  binance.us  {len(all_bars):>5} bar — {dt}")
-        time.sleep(0.15)
-        if len(bars) < 1000:
-            break
-    return all_bars
-
-
-def fetch_bybit():
-    """Bybit v5 — genellikle tüm bölgelerden erişilebilir."""
-    end_ts   = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ts = end_ts - MONTHS * 30 * 24 * 3600 * 1000
+    start_ts = end_ts - months * 30 * 24 * 3600 * 1000
     all_bars = []
     cur_end  = end_ts
     session  = requests.Session()
 
+    print("Bybit'ten veri çekiliyor...")
     while True:
         url = (
             "https://api.bybit.com/v5/market/kline"
-            f"?symbol=BTCUSDT&interval=60&limit=1000"
+            f"?symbol={SYMBOL}&interval=60&limit=1000"
             f"&start={start_ts}&end={cur_end}"
         )
         r = session.get(url, timeout=20)
         r.raise_for_status()
         data = r.json()
-        bars = data.get("result", {}).get("list", [])
+
+        if data.get("retCode") != 0:
+            raise RuntimeError(f"Bybit API hatası: {data.get('retMsg')}")
+
+        bars = data["result"]["list"]  # ters sıralı (en yeni önce)
         if not bars:
             break
-        # Bybit: [startTime, open, high, low, close, volume, turnover] — ters sıralı
+
         bars_sorted = sorted(bars, key=lambda x: int(x[0]))
         all_bars = bars_sorted + all_bars
+
         earliest = int(bars_sorted[0][0])
         dt = datetime.fromtimestamp(earliest / 1000).strftime("%Y-%m-%d")
-        print(f"  bybit  {len(all_bars):>5} bar — {dt}")
+        print(f"  {len(all_bars):>5} bar — {dt}")
+
         if earliest <= start_ts or len(bars) < 1000:
             break
         cur_end = earliest - 1
         time.sleep(0.15)
 
-    # Bybit formatını Binance formatına dönüştür
-    converted = []
-    for b in all_bars:
-        ts, o, h, l, c, v = int(b[0]), b[1], b[2], b[3], b[4], b[5]
-        converted.append([ts, o, h, l, c, v])
-    return converted
-
-
-def bars_to_df(all_bars):
-    df = pd.DataFrame(all_bars, columns=["ts","o","h","l","c","v"] + ["_"]*(len(all_bars[0])-6))
+    # Bybit formatı: [startTime, open, high, low, close, volume, turnover]
+    df = pd.DataFrame(all_bars, columns=["ts","o","h","l","c","v","turnover"])
     df = df[["ts","o","h","l","c","v"]].copy()
     df[["o","h","l","c","v"]] = df[["o","h","l","c","v"]].astype(float)
     df["ts"] = df["ts"].astype(int)
     df.drop_duplicates("ts", inplace=True)
     df.sort_values("ts", inplace=True)
     df.reset_index(drop=True, inplace=True)
+
+    print(f"\n✓ {len(df)} bar yüklendi.")
+    print(f"  Dönem: {datetime.fromtimestamp(df['ts'].iloc[0]/1000).strftime('%Y-%m-%d')} → "
+          f"{datetime.fromtimestamp(df['ts'].iloc[-1]/1000).strftime('%Y-%m-%d')}\n")
     return df
-
-
-def fetch_data():
-    sources = [
-        ("Binance Vision (mirror)", fetch_binance_vision),
-        ("Binance US",              fetch_binance_us),
-        ("Binance.com",             fetch_binance_com),
-        ("Bybit",                   fetch_bybit),
-    ]
-    for name, fn in sources:
-        try:
-            print(f"\nKaynak deneniyor: {name}")
-            bars = fn()
-            if len(bars) < 500:
-                print(f"  Yeterli veri gelmedi ({len(bars)} bar), sonraki kaynağa geçiliyor...")
-                continue
-            df = bars_to_df(bars)
-            print(f"\n✓ {name} — {len(df)} bar yüklendi.")
-            print(f"  Dönem: {datetime.fromtimestamp(df['ts'].iloc[0]/1000).strftime('%Y-%m-%d')} → "
-                  f"{datetime.fromtimestamp(df['ts'].iloc[-1]/1000).strftime('%Y-%m-%d')}\n")
-            return df
-        except Exception as e:
-            print(f"  HATA: {e}")
-
-    raise RuntimeError("Hiçbir kaynaktan veri alınamadı. İnternet bağlantısını kontrol edin.")
 
 
 # ── 2. İNDİKATÖRLER ──────────────────────────────────────────────────────────
@@ -205,8 +97,8 @@ def run_backtest(df):
     df["ema50"]  = df["c"].ewm(span=50,  adjust=False).mean()
     df["ema200"] = df["c"].ewm(span=200, adjust=False).mean()
     df["atr"]    = calc_atr(df)
-    df["hi20"]   = df["h"].rolling(20).max().shift(1)
-    df["lo20"]   = df["l"].rolling(20).min().shift(1)
+    df["hi20"]   = df["h"].rolling(20).max().shift(1)   # bir önceki bar max
+    df["lo20"]   = df["l"].rolling(20).min().shift(1)   # bir önceki bar min
     df["hi10"]   = df["h"].rolling(10).max().shift(1)
     df["lo10"]   = df["l"].rolling(10).min().shift(1)
 
@@ -219,7 +111,7 @@ def run_backtest(df):
         if pd.isna(row["ema50"]) or pd.isna(row["atr"]):
             continue
 
-        # ── Açık pozisyon takibi ──────────────────────────────────────────
+        # ── Açık pozisyon takibi ─────────────────────────────────────────
         if in_trade and trade:
             nxt = df["c"].iloc[i]
             if trade["side"] == "LONG":
@@ -250,7 +142,7 @@ def run_backtest(df):
         elif row["ema50"] < row["ema200"] and price < row["ema50"]:  direction = "SHORT"
         else: continue
 
-        # ── Breakout sinyali ─────────────────────────────────────────────
+        # ── Breakout sinyali (sadece gövde ile kıran mumlar) ────────────
         o, c = row["o"], row["c"]
         sig = None
         if direction == "LONG"  and o <= row["hi20"] and c > row["hi20"]: sig = "LONG"
@@ -318,7 +210,7 @@ def print_results(trades):
 
     sep = "─" * 48
     print(sep)
-    print("  BTC/USDT 1H — BACKTEST SONUÇLARI")
+    print("  BTC/USDT 1H — BACKTEST SONUÇLARI (Bybit)")
     print(sep)
     print(f"  Toplam işlem       : {len(trades)}")
     print(f"  Kazanma oranı      : {win_rate:.1f}%  ({len(wins)}W / {len(losses)}L)")
@@ -349,6 +241,6 @@ def print_results(trades):
 # ── 5. MAIN ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    df     = fetch_data()
+    df     = fetch_bybit()
     trades = run_backtest(df)
     print_results(trades)
