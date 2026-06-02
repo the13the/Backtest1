@@ -7,6 +7,7 @@ TIMEFRAME = "1h"
 
 RISK_USD = 10
 RR = 1.8
+STOP_LOOKBACK = 10
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
@@ -15,6 +16,7 @@ exchange = ccxt.okx({
 
 
 def fetch():
+
     all_data = []
 
     since = exchange.milliseconds() - (365 * 24 * 60 * 60 * 1000)
@@ -73,9 +75,11 @@ def trend(df, i):
     return "SHORT"
 
 
-def run_test(df, stop_lookback):
+def run_test(df, tp_mode):
 
     trades = []
+
+    atr_series = atr(df)
 
     for i in range(220, len(df)-1):
 
@@ -86,19 +90,16 @@ def run_test(df, stop_lookback):
 
         close = df["c"].iloc[i]
 
-        last_high = highs.iloc[i-1]
-        last_low = lows.iloc[i-1]
-
         signal = None
 
         if direction == "LONG":
 
-            if close > last_high:
+            if close > highs.iloc[i-1]:
                 signal = "LONG"
 
         else:
 
-            if close < last_low:
+            if close < lows.iloc[i-1]:
                 signal = "SHORT"
 
         if signal is None:
@@ -110,7 +111,7 @@ def run_test(df, stop_lookback):
 
             sl = (
                 df["l"]
-                .rolling(stop_lookback)
+                .rolling(STOP_LOOKBACK)
                 .min()
                 .iloc[i]
             )
@@ -120,13 +121,27 @@ def run_test(df, stop_lookback):
             if risk_dist <= 0:
                 continue
 
-            tp = entry + risk_dist * RR
+            if tp_mode == "RR":
+                tp = entry + risk_dist * RR
+
+            elif tp_mode == "SWING":
+                tp = (
+                    df["h"]
+                    .rolling(20)
+                    .max()
+                    .iloc[i]
+                )
+
+            elif tp_mode == "ATR":
+                tp = entry + (
+                    atr_series.iloc[i] * 3
+                )
 
         else:
 
             sl = (
                 df["h"]
-                .rolling(stop_lookback)
+                .rolling(STOP_LOOKBACK)
                 .max()
                 .iloc[i]
             )
@@ -136,13 +151,25 @@ def run_test(df, stop_lookback):
             if risk_dist <= 0:
                 continue
 
-            tp = entry - risk_dist * RR
+            if tp_mode == "RR":
+                tp = entry - risk_dist * RR
 
-        qty = RISK_USD / risk_dist
+            elif tp_mode == "SWING":
+                tp = (
+                    df["l"]
+                    .rolling(20)
+                    .min()
+                    .iloc[i]
+                )
+
+            elif tp_mode == "ATR":
+                tp = entry - (
+                    atr_series.iloc[i] * 3
+                )
 
         result = None
 
-        for j in range(i+1, min(i+50, len(df))):
+        for j in range(i+1, min(i+80, len(df))):
 
             high = df["h"].iloc[j]
             low = df["l"].iloc[j]
@@ -154,7 +181,11 @@ def run_test(df, stop_lookback):
                     break
 
                 if high >= tp:
-                    result = RISK_USD * RR
+                    reward = (
+                        abs(tp-entry)
+                        / risk_dist
+                    )
+                    result = reward * RISK_USD
                     break
 
             else:
@@ -164,7 +195,11 @@ def run_test(df, stop_lookback):
                     break
 
                 if low <= tp:
-                    result = RISK_USD * RR
+                    reward = (
+                        abs(entry-tp)
+                        / risk_dist
+                    )
+                    result = reward * RISK_USD
                     break
 
         if result is not None:
@@ -179,57 +214,73 @@ def run_test(df, stop_lookback):
 
 def report(name, trades):
 
-    wins = len([x for x in trades if x["pnl"] > 0])
-    losses = len([x for x in trades if x["pnl"] < 0])
+    wins = len([
+        x for x in trades
+        if x["pnl"] > 0
+    ])
+
+    losses = len([
+        x for x in trades
+        if x["pnl"] < 0
+    ])
 
     total = wins + losses
 
-    wr = 0
+    wr = (
+        wins / total * 100
+        if total else 0
+    )
 
-    if total > 0:
-        wr = wins / total * 100
+    pnl = sum(
+        x["pnl"]
+        for x in trades
+    )
 
-    pnl = sum(x["pnl"] for x in trades)
+    longs = [
+        x for x in trades
+        if x["side"] == "LONG"
+    ]
 
-    longs = [x for x in trades if x["side"] == "LONG"]
-    shorts = [x for x in trades if x["side"] == "SHORT"]
-
-    long_wins = len([x for x in longs if x["pnl"] > 0])
-    short_wins = len([x for x in shorts if x["pnl"] > 0])
+    shorts = [
+        x for x in trades
+        if x["side"] == "SHORT"
+    ]
 
     long_wr = (
-        long_wins / len(longs) * 100
+        len([x for x in longs if x["pnl"] > 0])
+        / len(longs) * 100
         if longs else 0
     )
 
     short_wr = (
-        short_wins / len(shorts) * 100
+        len([x for x in shorts if x["pnl"] > 0])
+        / len(shorts) * 100
         if shorts else 0
     )
 
     print()
-    print("====================================")
+    print("="*40)
     print(name)
-    print("====================================")
+    print("="*40)
     print("Trades:", total)
-    print("Wins:", wins)
-    print("Losses:", losses)
     print("WR:", round(wr,2), "%")
     print("LONG WR:", round(long_wr,2), "%")
     print("SHORT WR:", round(short_wr,2), "%")
     print("Net PnL:", round(pnl,2))
-    print()
 
 
-print("Loading BTC 12 month data...")
+print("Loading BTC data...")
 
 df = fetch()
 
-for stop in [5,7,10]:
+for mode in ["RR", "SWING", "ATR"]:
 
-    trades = run_test(df, stop)
+    trades = run_test(
+        df,
+        mode
+    )
 
     report(
-        f"STOP LOOKBACK {stop}",
+        f"TP MODE = {mode}",
         trades
     )
