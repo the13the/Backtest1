@@ -20,4 +20,4 @@ jobs:
 
     - name: Run backtest
       run: |
-        python backtest_v4.py
+        python backtest_v3.py
