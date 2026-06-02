@@ -1,4 +1,3 @@
-yfinance
+ccxt
 pandas
 numpy
-matplotlib
